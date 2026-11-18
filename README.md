@@ -1,10 +1,11 @@
 # Waveshare RLCD Home Assistant display
 
 ESPHome dashboard for a Waveshare ESP32-S3 4.2-inch, 400 x 300 reflective LCD using the ST7305 driver.
-![Display overview](Pictures/PXL_20261118_175814750.jpg)
+   <p align="center">
+<img width="400" height="800" alt="image" src="Pictures/PXL_20261118_175814750.jpg" />
+   </p>
 
 The button cycles through three pages:
-
 - **Dashboard:** clock/date, weather, live glucose, next calendar event, and download/upload speeds.
 - **Weather:** temperature, feels-like temperature, humidity, wind, cloud cover, and UV index.
 - **Glucose:** current reading, 5-minute change, 24-hour average/history graph, and sensor expiry.
