@@ -1,7 +1,7 @@
 # Waveshare RLCD Home Assistant display
 
 ESPHome dashboard for a Waveshare ESP32-S3 4.2-inch, 400 x 300 reflective LCD using the ST7305 driver.
-![Uploading PXL_20261118_175814750.jpg…]()
+![Display overview][Pictures/PXL_20261118_175814750.jpg]
 
 The button cycles through three pages:
 
