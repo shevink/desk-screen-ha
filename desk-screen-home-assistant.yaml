@@ -1,0 +1,98 @@
+# Fill in the entity parameters below; glucose readings must use mmol/L.
+# Set glucose_entity to the same value as in desk-screen.yaml.
+# Merge this template section into Home Assistant configuration.yaml.
+# Install either this file or the other Home Assistant variant, not both.
+template:
+  - variables:
+      glucose_entity: "sensor.your_glucose_measurement"
+      glucose_expiry_entity: "sensor.your_glucose_expiration_timestamp"
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+        seconds: 0
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ is_number(states(glucose_entity)) }}
+    sensor:
+      - name: "Desk Screen Glucose 24h"
+        unique_id: desk_screen_glucose_24h
+        unit_of_measurement: "mmol/L"
+        state_class: measurement
+        state: >-
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set cutoff = now_ts - 86400 %}
+          {% set previous = this.attributes.samples | default('', true) %}
+          {% set kept = namespace(records=[]) %}
+          {% for item in previous.split(',') if item %}
+            {% set parts = item.split(':') %}
+            {% if parts | length == 2 and parts[0] | int(0) >= cutoff %}
+              {% set kept.records = kept.records + [parts[0] ~ ':' ~ parts[1]] %}
+            {% endif %}
+          {% endfor %}
+          {% set current = (states(glucose_entity) | float * 10) | round(0) | int %}
+          {% set records = kept.records[-288:] + [now_ts ~ ':' ~ current] %}
+          {% set values = namespace(total=0, count=0) %}
+          {% for item in records %}
+            {% set value = item.split(':')[1] | int(0) %}
+            {% set values.total = values.total + value %}
+            {% set values.count = values.count + 1 %}
+          {% endfor %}
+          {{ (values.total / values.count / 10) | round(1) }}
+        attributes:
+          samples: >-
+            {% set now_ts = as_timestamp(now()) | int %}
+            {% set cutoff = now_ts - 86400 %}
+            {% set previous = this.attributes.samples | default('', true) %}
+            {% set kept = namespace(records=[]) %}
+            {% for item in previous.split(',') if item %}
+              {% set parts = item.split(':') %}
+              {% if parts | length == 2 and parts[0] | int(0) >= cutoff %}
+                {% set kept.records = kept.records + [parts[0] ~ ':' ~ parts[1]] %}
+              {% endif %}
+            {% endfor %}
+            {% set current = (states(glucose_entity) | float * 10) | round(0) | int %}
+            {{ (kept.records[-288:] + [now_ts ~ ':' ~ current]) | join(',') }}
+          delta_5m: >-
+            {% set previous = this.attributes.samples | default('', true) %}
+            {% set records = previous.split(',') | reject('eq', '') | list %}
+            {% if records | count > 0 %}
+              {% set old = records[-1].split(':')[1] | int(0) %}
+              {% set current = (states(glucose_entity) | float * 10) | round(0) | int %}
+              {{ ((current - old) / 10) | round(1) }}
+            {% else %}
+              {{ none }}
+            {% endif %}
+          expiry_text: >-
+            {% set raw = states(glucose_expiry_entity) %}
+            {% if raw in ['unknown', 'unavailable', 'none', ''] %}
+              --
+            {% elif is_number(raw) and raw | float < 1000 %}
+              {% set days = raw | float | round(0, 'ceil') | int %}
+              {% if days <= 0 %}
+                EXPIRED
+              {% elif days == 1 %}
+                1 DAY LEFT
+              {% else %}
+                {{ days }} DAYS LEFT
+              {% endif %}
+            {% else %}
+              {% if is_number(raw) %}
+                {% set numeric_expiry = raw | float %}
+                {% set expiry_ts = numeric_expiry / 1000 if numeric_expiry > 100000000000 else numeric_expiry %}
+              {% else %}
+                {% set expiry_ts = as_timestamp(raw, none) %}
+              {% endif %}
+              {% if expiry_ts is none %}
+                --
+              {% else %}
+                {% set days = ((expiry_ts - as_timestamp(now())) / 86400) | round(0, 'ceil') | int %}
+                {% if days <= 0 %}
+                  EXPIRED
+                {% elif days == 1 %}
+                  1 DAY LEFT
+                {% else %}
+                  {{ days }} DAYS LEFT
+                {% endif %}
+              {% endif %}
+            {% endif %}

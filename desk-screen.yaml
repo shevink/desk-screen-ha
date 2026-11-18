@@ -1,0 +1,862 @@
+# Fill in these settings before installing. Credentials go in secrets.yaml.
+# Entity IDs must match Home Assistant; the glucose sensor must use mmol/L.
+substitutions:
+  device_name: "desk-screen"
+  friendly_name: "Desk Screen"
+  timezone: "Etc/UTC"  # Replace with your timezone, e.g. Europe/London.
+
+  # Weather inputs (temperatures in degrees C, wind speed in km/h).
+  weather_entity: "weather.openweathermap"
+  weather_humidity_entity: "weather.openweathermap"
+  weather_temperature_entity: "sensor.openweathermap_temperature"
+  weather_feels_like_entity: "sensor.openweathermap_apparent_temperature"
+  weather_wind_speed_entity: "sensor.openweathermap_wind_speed"
+  weather_cloud_coverage_entity: "sensor.openweathermap_cloud_coverage"
+  weather_uv_index_entity: "sensor.openweathermap_uv_index"
+
+  # Replace the personal glucose and calendar inputs with your entity IDs.
+  glucose_entity: "sensor.your_glucose_measurement"
+  glucose_history_entity: "sensor.desk_screen_glucose_24h"
+  calendar_entity: "calendar.your_calendar"
+  speedtest_download_entity: "sensor.speedtest_download"
+  speedtest_upload_entity: "sensor.speedtest_upload"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${device_name} Fallback Hotspot"
+    password: !secret fallback_ap_password
+
+captive_portal:
+  
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source: github://kylehase/ESPHome-ST7305-RLCD
+    components: [st7305_rlcd]
+    refresh: 1h
+
+spi:
+  clk_pin: GPIO11
+  mosi_pin: GPIO12
+
+i2c:
+  sda: GPIO13
+  scl: GPIO14
+  scan: false
+
+i2s_audio:
+  - id: i2s_shared
+    i2s_lrclk_pin: GPIO45
+    i2s_bclk_pin: GPIO9
+    i2s_mclk_pin: GPIO16
+
+audio_dac:
+  - platform: es8311
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+speaker:
+  - platform: i2s_audio
+    id: desk_speaker
+    i2s_audio_id: i2s_shared
+    i2s_dout_pin: GPIO8
+    dac_type: external
+    audio_dac: es8311_dac
+    sample_rate: 16000
+    bits_per_sample: 16bit
+
+time:
+  - platform: sntp
+    id: device_time
+    timezone: ${timezone}
+    on_time:
+      - seconds: 0
+        minutes: 30
+        hours: 23
+        then:
+          - deep_sleep.enter:
+              id: night_sleep
+              sleep_duration: 570min
+
+deep_sleep:
+  id: night_sleep
+
+globals:
+  - id: display_screen
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: glucose_alert_state
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+text_sensor:
+  - platform: homeassistant
+    id: weather_state
+    entity_id: ${weather_entity}
+
+  - platform: homeassistant
+    id: glucose_history_samples
+    entity_id: ${glucose_history_entity}
+    attribute: samples
+
+  - platform: homeassistant
+    id: glucose_expiry_text
+    entity_id: ${glucose_history_entity}
+    attribute: expiry_text
+
+  - platform: homeassistant
+    id: calendar_message
+    entity_id: ${calendar_entity}
+    attribute: message
+
+  - platform: homeassistant
+    id: calendar_start_time
+    entity_id: ${calendar_entity}
+    attribute: start_time
+
+binary_sensor:
+  - platform: gpio
+    id: screen_button
+    name: "Desk Screen Key"
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    on_press:
+      then:
+        - lambda: |-
+            id(display_screen) = (id(display_screen) + 1) % 3;
+        - component.update: my_display
+        - script.execute: play_screen_change_tone
+
+sensor:
+  - platform: homeassistant
+    id: weather_temperature
+    entity_id: ${weather_temperature_entity}
+
+  - platform: homeassistant
+    id: weather_feels_like
+    entity_id: ${weather_feels_like_entity}
+
+  - platform: homeassistant
+    id: weather_humidity
+    entity_id: ${weather_humidity_entity}
+    attribute: humidity
+
+  - platform: homeassistant
+    id: weather_wind_speed
+    entity_id: ${weather_wind_speed_entity}
+
+  - platform: homeassistant
+    id: weather_cloud_coverage
+    entity_id: ${weather_cloud_coverage_entity}
+
+  - platform: homeassistant
+    id: weather_uv_index
+    entity_id: ${weather_uv_index_entity}
+
+  - platform: homeassistant
+    id: glucose_level
+    # LibreLink Measurement must use mmol/L to match the display and alerts.
+    entity_id: ${glucose_entity}
+    on_value:
+      then:
+        - lambda: |-
+            int next_alert_state = 0;
+            if (x < 4.2f) {
+              next_alert_state = 1;
+            } else if (x > 12.0f) {
+              next_alert_state = 2;
+            }
+
+            if (next_alert_state != id(glucose_alert_state)) {
+              id(glucose_alert_state) = next_alert_state;
+              if (next_alert_state == 1) {
+                id(play_low_glucose_alert).execute();
+              } else if (next_alert_state == 2) {
+                id(play_high_glucose_alert).execute();
+              }
+            }
+        - component.update: my_display
+
+  - platform: homeassistant
+    id: glucose_average_24h
+    entity_id: ${glucose_history_entity}
+
+  - platform: homeassistant
+    id: glucose_delta_5m
+    entity_id: ${glucose_history_entity}
+    attribute: delta_5m
+
+  - platform: homeassistant
+    id: speedtest_download
+    entity_id: ${speedtest_download_entity}
+
+  - platform: homeassistant
+    id: speedtest_upload
+    entity_id: ${speedtest_upload_entity}
+
+switch:
+  - platform: gpio
+    id: speaker_amp
+    internal: true
+    pin: GPIO46
+    restore_mode: ALWAYS_OFF
+
+  - platform: template
+    id: glucose_alarm_sound
+    name: "Glucose Alarm Sound"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_off_action:
+      - rtttl.stop
+      - switch.turn_off: speaker_amp
+
+rtttl:
+  id: glucose_rtttl
+  speaker: desk_speaker
+  gain: 40%
+  on_finished_playback:
+    - switch.turn_off: speaker_amp
+
+script:
+  - id: play_screen_change_tone
+    mode: restart
+    then:
+      - if:
+          condition:
+            not:
+              rtttl.is_playing
+          then:
+            - switch.turn_on: speaker_amp
+            - delay: 40ms
+            - lambda: id(glucose_rtttl).set_gain(0.7f);
+            - rtttl.play: "screen:d=16,o=6,b=180:c"
+
+  - id: play_low_glucose_alert
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: glucose_alarm_sound
+          then:
+            - rtttl.stop
+            - switch.turn_on: speaker_amp
+            - delay: 40ms
+            - lambda: id(glucose_rtttl).set_gain(0.4f);
+            - rtttl.play: "low:d=16,o=4,b=100:e,c,e,c"
+
+  - id: play_high_glucose_alert
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: glucose_alarm_sound
+          then:
+            - rtttl.stop
+            - switch.turn_on: speaker_amp
+            - delay: 40ms
+            - lambda: id(glucose_rtttl).set_gain(0.4f);
+            - rtttl.play: "high:d=16,o=6,b=120:c,e,c,e"
+
+font:
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_tiny
+    size: 18
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_small
+    size: 24
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_medium
+    size: 28
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_big
+    size: 56
+
+  - file: "gfonts://JetBrains Mono@600"
+    id: font_huge
+    size: 70
+
+  - file: "gfonts://JetBrains Mono@600"
+    id: font_glucose_compact
+    size: 49
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_weather_temperature
+    size: 62
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: font_glucose_detail
+    size: 60
+
+  - file: "gfonts://JetBrains Mono@600"
+    id: font_glucose_detail_compact
+    size: 52
+
+  # Cyberpunk HUD type scale. These sizes are shared by all three pages so
+  # labels and values remain optically consistent after the Figma cleanup.
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_micro
+    size: 9
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_label
+    size: 12
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_small
+    size: 17
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_compact
+    size: 14
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_main_lower
+    size: 16
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_readout
+    size: 20
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_medium
+    size: 24
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_header
+    size: 34
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_temperature
+    size: 48
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_value
+    size: 58
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_glucose_main
+    size: 64
+
+  - file: "gfonts://JetBrains Mono@700"
+    id: hud_value_compact
+    size: 50
+
+display:
+  - platform: st7305_rlcd
+    model: WAVESHARE_400X300
+    id: my_display
+    width: 400
+    height: 300
+    cs_pin: GPIO40
+    dc_pin: GPIO5
+    reset_pin: GPIO41
+    data_rate: 1MHz
+    update_interval: 20s
+    lambda: |-
+      // ------------------------------------------------------------------
+      // Normalized 400x300 cyberpunk HUD derived from the edited Figma file.
+      // All coordinates below are native display pixels.
+      // ------------------------------------------------------------------
+      {
+        const auto INK = COLOR_ON;
+        const auto PAPER = COLOR_OFF;
+
+        auto upper_hud = [](std::string text) {
+          std::transform(text.begin(), text.end(), text.begin(), ::toupper);
+          std::replace(text.begin(), text.end(), '-', ' ');
+          return text;
+        };
+
+        auto truncate_hud = [](std::string text, size_t length) {
+          if (text.length() > length) text.resize(length);
+          return text;
+        };
+
+        auto draw_dotted_hline = [&](int x, int y, int width, decltype(INK) color = COLOR_ON) {
+          for (int px = 0; px < width; px += 5) {
+            it.horizontal_line(x + px, y, std::min(2, width - px), color);
+          }
+        };
+
+        auto outline_chamfer = [&](int x, int y, int w, int h,
+                                   int tl, int tr, int br, int bl,
+                                   decltype(INK) color = COLOR_ON) {
+          const int right = x + w - 1;
+          const int bottom = y + h - 1;
+          it.line(x + tl, y, right - tr, y, color);
+          it.line(right - tr, y, right, y + tr, color);
+          it.line(right, y + tr, right, bottom - br, color);
+          it.line(right, bottom - br, right - br, bottom, color);
+          it.line(right - br, bottom, x + bl, bottom, color);
+          it.line(x + bl, bottom, x, bottom - bl, color);
+          it.line(x, bottom - bl, x, y + tl, color);
+          it.line(x, y + tl, x + tl, y, color);
+        };
+
+        auto fill_chamfer = [&](int x, int y, int w, int h,
+                                int tl, int tr, int br, int bl,
+                                decltype(INK) color = COLOR_ON) {
+          for (int row = 0; row < h; row++) {
+            int left = 0;
+            int right = w - 1;
+            if (tl > 0 && row < tl) left = tl - row;
+            if (bl > 0 && row >= h - bl) left = row - (h - bl);
+            if (tr > 0 && row < tr) right = w - 1 - (tr - row);
+            if (br > 0 && row >= h - br) right = w - 1 - (row - (h - br));
+            if (right >= left) it.horizontal_line(x + left, y + row, right - left + 1, color);
+          }
+        };
+
+        // Draws a short piece of text top-to-bottom, one glyph per line, so
+        // it reads as a vertical label without needing rotated glyph support.
+        auto draw_vertical_text = [&](int x, int y, auto font_id, decltype(INK) color,
+                                      const std::string &text, int line_height) {
+          int line_y = y;
+          for (char c : text) {
+            std::string glyph(1, c);
+            it.print(x, line_y, font_id, color, TextAlign::TOP_CENTER, glyph.c_str());
+            line_y += line_height;
+          }
+        };
+
+        auto now_hud = id(device_time).now();
+
+        auto draw_header_hud = [&](const char *node_name, const char *page_number) {
+          // Solid time block with a mathematically consistent 24 px chamfer.
+          for (int y = 0; y < 55; y++) {
+            int right = 174 - (24 * y) / 54;
+            it.horizontal_line(0, y, right + 1, INK);
+          }
+          it.line(178, 0, 154, 55, INK);
+          it.line(180, 0, 156, 55, INK);
+
+          char time_text[8] = "--:--";
+          char date_text[16] = "--- --";
+          if (now_hud.is_valid()) {
+            now_hud.strftime(time_text, sizeof(time_text), "%H:%M");
+            now_hud.strftime(date_text, sizeof(date_text), "%a %d");
+            std::string date = upper_hud(date_text);
+            std::copy(date.begin(), date.end(), date_text);
+            date_text[date.length()] = '\0';
+          }
+          it.print(14, 7, id(hud_header), PAPER, TextAlign::TOP_LEFT, time_text);
+          // Date pulled left; node/page block pulled left and centered on
+          // the date's row without dropping below its lower line.
+          it.print(248, 8, id(hud_header), INK, TextAlign::TOP_CENTER, date_text);
+          it.print(326, 9, id(hud_compact), INK, TextAlign::TOP_LEFT, node_name);
+          it.print(326, 24, id(hud_compact), INK, TextAlign::TOP_LEFT, page_number);
+          it.horizontal_line(0, 58, 400, INK);
+          it.horizontal_line(0, 60, 400, INK);
+        };
+
+        std::string weather_hud = id(weather_state).has_state()
+          ? upper_hud(id(weather_state).state) : "--";
+        if (weather_hud == "PARTLYCLOUDY") weather_hud = "PARTLY CLOUDY";
+
+        std::string weather_line_1 = weather_hud;
+        std::string weather_line_2;
+        size_t weather_space = weather_hud.find(' ');
+        if (weather_space != std::string::npos) {
+          weather_line_1 = weather_hud.substr(0, weather_space);
+          weather_line_2 = weather_hud.substr(weather_space + 1);
+        }
+        weather_line_1 = truncate_hud(weather_line_1, 7);
+        weather_line_2 = truncate_hud(weather_line_2, 7);
+
+        // ================================================================
+        // PAGE 00 — DASHBOARD
+        // ================================================================
+        if (id(display_screen) == 0) {
+          draw_header_hud("SYS.00", "01/03");
+
+          // Weather block — flush with the left screen edge. The title bar
+          // now shows the live condition itself (bigger, so it stays
+          // readable) instead of a static "WEATHER//OUT" label.
+          outline_chamfer(0, 66, 195, 118, 0, 11, 11, 0, INK);
+          fill_chamfer(0, 66, 195, 94, 0, 11, 9, 0, INK);
+          std::string condition_hud = weather_line_2.empty()
+            ? weather_line_1 : weather_line_1 + " " + weather_line_2;
+          condition_hud = truncate_hud(condition_hud, 14);
+          it.print(10, 75, id(hud_readout), PAPER, TextAlign::TOP_LEFT, condition_hud.c_str());
+
+          if (!isnan(id(weather_temperature).state)) {
+            it.printf(9, 89, id(hud_value), PAPER, TextAlign::TOP_LEFT,
+                      "%.1f°", id(weather_temperature).state);
+          } else {
+            it.print(9, 89, id(hud_value), PAPER, TextAlign::TOP_LEFT, "--.-°");
+          }
+
+          // Feels/humidity row lines up with the LIVE row in the glucose
+          // block, and uses a slightly smaller font so there's breathing
+          // room between the two halves.
+          if (!isnan(id(weather_feels_like).state)) {
+            it.printf(9, 161, id(hud_main_lower), INK, TextAlign::TOP_LEFT,
+                      "FEELS %.1f°", id(weather_feels_like).state);
+          } else {
+            it.print(9, 161, id(hud_main_lower), INK, TextAlign::TOP_LEFT, "FEELS --.-°");
+          }
+          if (!isnan(id(weather_humidity).state)) {
+            it.printf(188, 161, id(hud_main_lower), INK, TextAlign::TOP_RIGHT,
+                      "HUM %.0f%%", id(weather_humidity).state);
+          } else {
+            it.print(188, 161, id(hud_main_lower), INK, TextAlign::TOP_RIGHT, "HUM --%");
+          }
+
+          // Glucose block — flush with the right screen edge, only a 6 px
+          // gap to the weather block now.
+          fill_chamfer(201, 66, 199, 118, 12, 0, 0, 12, INK);
+          outline_chamfer(207, 70, 187, 110, 9, 0, 0, 9, PAPER);
+          const char *glucose_title = "GLUCOSE";
+          if (!isnan(id(glucose_level).state) && id(glucose_level).state < 4.2f) glucose_title = "GLUCOSE//LOW";
+          if (!isnan(id(glucose_level).state) && id(glucose_level).state > 12.0f) glucose_title = "GLUCOSE//HIGH";
+          it.print(217, 73, id(hud_small), PAPER, TextAlign::TOP_LEFT, glucose_title);
+          if (!isnan(id(glucose_level).state)) {
+            it.printf(213, 89, id(hud_value), PAPER, TextAlign::TOP_LEFT,
+                      "%.1f", id(glucose_level).state);
+          } else {
+            it.print(213, 89, id(hud_value), PAPER, TextAlign::TOP_LEFT, "--.-");
+          }
+          // Delta sits on its own row without the LIVE label.
+          if (!isnan(id(glucose_delta_5m).state)) {
+            it.printf(217, 158, id(hud_main_lower), PAPER, TextAlign::TOP_LEFT,
+                      "%+.1f MMOL/L", id(glucose_delta_5m).state);
+          } else {
+            it.print(217, 158, id(hud_main_lower), PAPER, TextAlign::TOP_LEFT, "-- MMOL/L");
+          }
+
+          it.filled_rectangle(0, 194, 400, 29, INK);
+          int day_percent = 0;
+          if (now_hud.is_valid()) {
+            day_percent = ((now_hud.hour * 60 + now_hud.minute) * 100) / 1440;
+          }
+          it.printf(15, 197, id(hud_small), PAPER, TextAlign::TOP_LEFT,
+                    "DAY//%d%%", day_percent);
+          const int segment_count = 8;
+          int active_segments = (day_percent * segment_count + 50) / 100;
+          for (int i = 0; i < segment_count; i++) {
+            int sx = 110 + i * 30;
+            if (i < active_segments) {
+              fill_chamfer(sx, 202, 26, 14, 0, 0, 4, 4, PAPER);
+            } else {
+              outline_chamfer(sx, 202, 26, 14, 0, 0, 4, 4, PAPER);
+            }
+          }
+
+          outline_chamfer(7, 230, 386, 25, 0, 11, 11, 0, INK);
+          fill_chamfer(7, 230, 69, 25, 0, 11, 11, 0, INK);
+          it.print(16, 235, id(hud_label), PAPER, TextAlign::TOP_LEFT, "NEXT");
+
+          std::string next_hud = "--";
+          if (id(calendar_message).has_state()) {
+            next_hud.clear();
+            if (id(calendar_start_time).has_state()) {
+              std::string start = id(calendar_start_time).state;
+              if (start.length() >= 16) next_hud += start.substr(11, 5) + " // ";
+            }
+            std::string event_name = upper_hud(id(calendar_message).state);
+            if (event_name.length() > 5) event_name = event_name.substr(5);
+            next_hud += truncate_hud(event_name, 16);
+          }
+          it.print(86, 235, id(hud_label), INK, TextAlign::TOP_LEFT, next_hud.c_str());
+
+          // Net speed bar — label and values pulled in from the edges.
+          outline_chamfer(7, 261, 386, 27, 0, 0, 10, 10, INK);
+          it.print(30, 262, id(hud_small), INK, TextAlign::TOP_LEFT, "NET//SPEED");
+          if (!isnan(id(speedtest_download).state)) {
+            it.printf(240, 262, id(hud_small), INK, TextAlign::TOP_RIGHT,
+                      "D %.1f", id(speedtest_download).state);
+          } else {
+            it.print(240, 262, id(hud_small), INK, TextAlign::TOP_RIGHT, "D --");
+          }
+          if (!isnan(id(speedtest_upload).state)) {
+            it.printf(365, 262, id(hud_small), INK, TextAlign::TOP_RIGHT,
+                      "U %.1f", id(speedtest_upload).state);
+          } else {
+            it.print(365, 262, id(hud_small), INK, TextAlign::TOP_RIGHT, "U --");
+          }
+          return;
+        }
+
+        // ================================================================
+        // PAGE 01 — WEATHER DETAIL
+        // ================================================================
+        if (id(display_screen) == 1) {
+          draw_header_hud("WX.NODE", "02/03");
+
+          outline_chamfer(7, 66, 386, 94, 0, 12, 12, 16, INK);
+          it.print(16, 69, id(hud_small), INK, TextAlign::TOP_LEFT, "OUTSIDE//");
+          if (!isnan(id(weather_temperature).state)) {
+            it.printf(14, 82, id(hud_value), INK, TextAlign::TOP_LEFT,
+                      "%.1f°", id(weather_temperature).state);
+          } else {
+            it.print(14, 82, id(hud_value), INK, TextAlign::TOP_LEFT, "--.-°");
+          }
+          // Condition text — bigger and pushed further right so the "26.2°"
+          // block (which runs wide at this font size) no longer collides
+          // with it.
+          it.print(204, 78, id(hud_header), INK, TextAlign::TOP_LEFT, weather_line_1.c_str());
+          it.print(204, 112, id(hud_header), INK, TextAlign::TOP_LEFT, weather_line_2.c_str());
+
+          // Humidity — inverted panel (black bar, white digits), no percent
+          // sign, "HUM" label bumped up a size, moved in from the edge.
+          fill_chamfer(348, 66, 45, 94, 0, 12, 12, 0, INK);
+          it.print(370, 74, id(hud_label), PAPER, TextAlign::TOP_CENTER, "HUM");
+          std::string humidity_digits = "--";
+          if (!isnan(id(weather_humidity).state)) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%.0f", id(weather_humidity).state);
+            humidity_digits = buf;
+          }
+          draw_vertical_text(370, 92, id(hud_medium), PAPER, humidity_digits, 21);
+
+          // Metric boxes keep the label bars near the center split, but the
+          // labels are horizontal so they remain readable.
+          outline_chamfer(7, 168, 185, 55, 0, 9, 0, 0, INK);
+          fill_chamfer(102, 168, 90, 22, 9, 9, 0, 0, INK);
+          it.print(147, 171, id(hud_label), PAPER, TextAlign::TOP_CENTER, "FEELS");
+          if (!isnan(id(weather_feels_like).state)) {
+            it.printf(82, 193, id(hud_medium), INK, TextAlign::TOP_CENTER,
+                      "%.1f°", id(weather_feels_like).state);
+          } else {
+            it.print(82, 193, id(hud_medium), INK, TextAlign::TOP_CENTER, "--.-°");
+          }
+
+          outline_chamfer(208, 168, 185, 55, 9, 0, 0, 0, INK);
+          fill_chamfer(208, 168, 90, 22, 9, 9, 0, 0, INK);
+          it.print(253, 171, id(hud_label), PAPER, TextAlign::TOP_CENTER, "WIND");
+          if (!isnan(id(weather_wind_speed).state)) {
+            it.printf(311, 193, id(hud_medium), INK, TextAlign::TOP_CENTER,
+                      "%.1f KM/H", id(weather_wind_speed).state);
+          } else {
+            it.print(311, 193, id(hud_medium), INK, TextAlign::TOP_CENTER, "-- KM/H");
+          }
+
+          outline_chamfer(7, 232, 185, 56, 0, 0, 0, 0, INK);
+          fill_chamfer(102, 232, 90, 22, 0, 0, 0, 0, INK);
+          it.print(147, 235, id(hud_label), PAPER, TextAlign::TOP_CENTER, "CLOUDS");
+          if (!isnan(id(weather_cloud_coverage).state)) {
+            it.printf(82, 258, id(hud_medium), INK, TextAlign::TOP_CENTER,
+                      "%.0f%%", id(weather_cloud_coverage).state);
+          } else {
+            it.print(82, 258, id(hud_medium), INK, TextAlign::TOP_CENTER, "--%");
+          }
+
+          outline_chamfer(208, 232, 185, 56, 0, 0, 10, 0, INK);
+          fill_chamfer(208, 232, 90, 22, 0, 0, 0, 0, INK);
+          it.print(253, 235, id(hud_label), PAPER, TextAlign::TOP_CENTER, "UV INDEX");
+          if (!isnan(id(weather_uv_index).state)) {
+            it.printf(311, 258, id(hud_medium), INK, TextAlign::TOP_CENTER,
+                      "%.1f", id(weather_uv_index).state);
+          } else {
+            it.print(311, 258, id(hud_medium), INK, TextAlign::TOP_CENTER, "--");
+          }
+          return;
+        }
+
+        // ================================================================
+        // PAGE 02 — GLUCOSE DETAIL
+        // ================================================================
+        draw_header_hud("BIO.NODE", "03/03");
+
+        fill_chamfer(7, 66, 237, 116, 0, 10, 0, 0, INK);
+        outline_chamfer(13, 72, 225, 104, 0, 8, 0, 0, PAPER);
+        const char *detail_title = "GLUCOSE//LIVE";
+        if (!isnan(id(glucose_level).state) && id(glucose_level).state < 4.2f) detail_title = "GLUCOSE//LOW";
+        if (!isnan(id(glucose_level).state) && id(glucose_level).state > 12.0f) detail_title = "GLUCOSE//HIGH";
+        it.print(18, 76, id(hud_small), PAPER, TextAlign::TOP_LEFT, detail_title);
+        it.print(231, 76, id(hud_small), PAPER, TextAlign::TOP_RIGHT, "MMOL/L");
+        if (!isnan(id(glucose_level).state)) {
+          it.printf(17, 95, id(hud_value), PAPER, TextAlign::TOP_LEFT,
+                    "%.1f", id(glucose_level).state);
+        } else {
+          it.print(17, 95, id(hud_value), PAPER, TextAlign::TOP_LEFT, "--.-");
+        }
+        // Arrow removed — delta value takes its place, right-aligned on
+        // the same vertical line as MMOL/L, and raised up a bit.
+        it.print(204, 112, id(hud_label), PAPER, TextAlign::TOP_CENTER, "DELTA");
+        if (!isnan(id(glucose_delta_5m).state)) {
+          it.printf(204, 128, id(hud_medium), PAPER, TextAlign::TOP_CENTER,
+                    "%+.1f", id(glucose_delta_5m).state);
+        } else {
+          it.print(204, 128, id(hud_medium), PAPER, TextAlign::TOP_CENTER, "--");
+        }
+
+        outline_chamfer(244, 66, 149, 116, 10, 0, 0, 0, INK);
+        fill_chamfer(244, 66, 149, 34, 10, 0, 0, 0, INK);
+        // Same size and row as GLUCOSE//, for a consistent title rhythm.
+        it.print(319, 76, id(hud_small), PAPER, TextAlign::TOP_CENTER, "24H//SUMMARY");
+        // AVERAGE label, its value, and the days-left text all share the
+        // same size now instead of the value overpowering the label.
+        it.print(257, 112, id(hud_small), INK, TextAlign::TOP_LEFT, "AVERAGE");
+        if (!isnan(id(glucose_average_24h).state)) {
+          it.printf(384, 112, id(hud_small), INK, TextAlign::TOP_RIGHT,
+                    "%.1f", id(glucose_average_24h).state);
+        } else {
+          it.print(384, 112, id(hud_small), INK, TextAlign::TOP_RIGHT, "--.-");
+        }
+        it.horizontal_line(250, 142, 136, INK);
+        // "SENSOR" label dropped — just the days-left text remains, same
+        // size, sitting neatly below the divider.
+        std::string expiry_hud = id(glucose_expiry_text).has_state()
+          ? upper_hud(id(glucose_expiry_text).state) : "--";
+        expiry_hud = truncate_hud(expiry_hud, 16);
+        it.print(257, 146, id(hud_small), INK, TextAlign::TOP_LEFT, expiry_hud.c_str());
+
+        outline_chamfer(7, 188, 386, 100, 0, 0, 11, 11, INK);
+        fill_chamfer(7, 188, 100, 28, 0, 10, 10, 0, INK);
+        it.print(18, 193, id(hud_small), PAPER, TextAlign::TOP_LEFT, "24H");
+
+        std::vector<uint32_t> hud_history_times;
+        std::vector<float> hud_history_values;
+        if (id(glucose_history_samples).has_state()) {
+          const std::string &history = id(glucose_history_samples).state;
+          size_t record_start = 0;
+          while (record_start < history.length()) {
+            size_t record_end = history.find(',', record_start);
+            if (record_end == std::string::npos) record_end = history.length();
+            size_t separator = history.find(':', record_start);
+            if (separator != std::string::npos && separator < record_end) {
+              std::string time_text = history.substr(record_start, separator - record_start);
+              std::string value_text = history.substr(separator + 1, record_end - separator - 1);
+              char *time_end = nullptr;
+              char *value_end = nullptr;
+              uint32_t timestamp = (uint32_t) strtoul(time_text.c_str(), &time_end, 10);
+              long value_tenths = strtol(value_text.c_str(), &value_end, 10);
+              while (*time_end != '\0' && isspace((unsigned char) *time_end)) time_end++;
+              while (*value_end != '\0' && isspace((unsigned char) *value_end)) value_end++;
+              bool valid = time_end != time_text.c_str() && *time_end == '\0'
+                && value_end != value_text.c_str() && *value_end == '\0'
+                && timestamp > 0;
+              if (valid && (!now_hud.is_valid() || timestamp + 86400U >= (uint32_t) now_hud.timestamp)) {
+                float value = value_tenths / 10.0f;
+                if (!hud_history_times.empty() && timestamp == hud_history_times.back()) {
+                  hud_history_values.back() = value;
+                } else if (hud_history_times.empty() || timestamp > hud_history_times.back()) {
+                  hud_history_times.push_back(timestamp);
+                  hud_history_values.push_back(value);
+                }
+              }
+            }
+            if (record_end == history.length()) break;
+            record_start = record_end + 1;
+          }
+        }
+
+        if (hud_history_values.empty() && !isnan(id(glucose_level).state)) {
+          hud_history_times.push_back(now_hud.is_valid() ? (uint32_t) now_hud.timestamp : 1U);
+          hud_history_values.push_back(id(glucose_level).state);
+        }
+
+        const int graph_x_hud = 21;
+        const int graph_y_hud = 222;
+        const int graph_width_hud = 344;
+        const int graph_height_hud = 51;
+        draw_dotted_hline(graph_x_hud, graph_y_hud + 3, graph_width_hud, INK);
+        draw_dotted_hline(graph_x_hud, graph_y_hud + graph_height_hud / 2, graph_width_hud, INK);
+        draw_dotted_hline(graph_x_hud, graph_y_hud + graph_height_hud - 2, graph_width_hud, INK);
+
+        if (!hud_history_values.empty()) {
+          float actual_min = hud_history_values[0];
+          float actual_max = hud_history_values[0];
+          for (float value : hud_history_values) {
+            actual_min = std::min(actual_min, value);
+            actual_max = std::max(actual_max, value);
+          }
+          it.printf(384, 193, id(hud_small), INK, TextAlign::TOP_RIGHT, "MAX %.1f", actual_max);
+          it.printf(384, 277, id(hud_small), INK, TextAlign::BOTTOM_RIGHT, "MIN %.1f", actual_min);
+
+          float value_min = actual_min;
+          float value_max = actual_max;
+          float range = value_max - value_min;
+          if (range < 2.0f) {
+            float center = (value_min + value_max) / 2.0f;
+            value_min = center - 1.0f;
+            value_max = center + 1.0f;
+          } else {
+            float padding = std::max(0.5f, range * 0.1f);
+            value_min -= padding;
+            value_max += padding;
+          }
+          auto graph_y_for_hud = [&](float value) {
+            float ratio = (value - value_min) / (value_max - value_min);
+            int py = graph_y_hud + graph_height_hud - 1
+              - (int) roundf(ratio * (graph_height_hud - 1));
+            return std::max(graph_y_hud, std::min(graph_y_hud + graph_height_hud - 1, py));
+          };
+
+          if (hud_history_values.size() == 1) {
+            it.horizontal_line(graph_x_hud, graph_y_for_hud(hud_history_values[0]), graph_width_hud, INK);
+          } else {
+            uint32_t first_time = hud_history_times.front();
+            uint32_t last_time = hud_history_times.back();
+            bool full_window = now_hud.is_valid()
+              && first_time <= (uint32_t) now_hud.timestamp - 86100U;
+            uint32_t x_start = full_window ? (uint32_t) now_hud.timestamp - 86400U : first_time;
+            uint32_t x_end = full_window ? (uint32_t) now_hud.timestamp : last_time;
+            int previous_x = graph_x_hud;
+            int previous_y = graph_y_for_hud(hud_history_values[0]);
+            for (size_t i = 1; i < hud_history_values.size(); i++) {
+              int px;
+              if (x_end > x_start) {
+                px = graph_x_hud + (int) (((uint64_t) (hud_history_times[i] - x_start)
+                  * (graph_width_hud - 1)) / (x_end - x_start));
+              } else {
+                px = graph_x_hud + (int) ((i * (graph_width_hud - 1))
+                  / (hud_history_values.size() - 1));
+              }
+              px = std::max(graph_x_hud, std::min(graph_x_hud + graph_width_hud - 1, px));
+              int py = graph_y_for_hud(hud_history_values[i]);
+              it.line(previous_x, previous_y, px, py, INK);
+              previous_x = px;
+              previous_y = py;
+            }
+          }
+        } else {
+          it.print(200, 241, id(hud_small), INK, TextAlign::TOP_CENTER, "NO HISTORY");
+          it.print(384, 193, id(hud_small), INK, TextAlign::TOP_RIGHT, "MAX --");
+          it.print(384, 277, id(hud_small), INK, TextAlign::BOTTOM_RIGHT, "MIN --");
+        }
+        return;
+      }

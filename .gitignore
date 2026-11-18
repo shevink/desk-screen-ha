@@ -1,0 +1,7 @@
+# Local credentials, build output, and machine-specific state.
+/secrets.yaml
+/.esphome/
+/.venv/
+/.device-builder*
+__pycache__/
+*.pyc
